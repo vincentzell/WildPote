@@ -1,25 +1,55 @@
-WildPote — Documentation technique
-1. Contexte
+# WildPote — Documentation technique
 
-Bot pour WildStat MMO (wildstatmmo.com), un jeu de farm/ARPG idle joué dans le navigateur. Le bot est injecté via Tampermonkey (userscript) et interagit avec l'API officielle du jeu exposée en JavaScript.
+Bot pour **WildStat MMO** (`wildstatmmo.com`), un ARPG idle joué dans le navigateur.
+Le bot est injecté via **Violentmonkey** (userscript) et interagit avec l'API officielle du jeu.
 
-Objectif V1 : piloter les déplacements majeurs (retour town) et l'état du joueur via l'API native, sans jamais manipuler le WebSocket ni contourner les règles serveur.
-2. Architecture du jeu (ce qu'il faut savoir)
-2.1 Stack
+**Version actuelle** : 10.5 — Kiting fonctionnel, Home fonctionnel
 
-    Frontend : modules ES chargés par le site, bundle coop-client.*.js + game.*.js
+---
 
-    Backend : SpacetimeDB (maincloud.spacetimedb.com, database wildwood-coop)
+## Table des matières
 
-    Auth : JWT SpacetimeDB stocké dans localStorage (clés auth_token/spacetimeauth_id_token_v1, etc.)
+1. [Contexte du jeu](#1-contexte-du-jeu)
+2. [Architecture de l'API du jeu](#2-architecture-de-lapi-du-jeu)
+3. [Le problème du CSP et de l'isolation](#3-le-problème-du-csp-et-de-lisolation)
+4. [Architecture du bot](#4-architecture-du-bot)
+5. [Le hook Array cross-context](#5-le-hook-array-cross-context)
+6. [Le kiting](#6-le-kiting)
+7. [Home et voyage](#7-home-et-voyage)
+8. [Debug et diagnostic](#8-debug-et-diagnostic)
+9. [Historique des décisions](#9-historique-des-décisions)
+10. [Pistes futures](#10-pistes-futures)
 
-    Communication : WebSocket binaire (BSATN), pas du JSON
+---
 
-2.2 API publique exposée
+## 1. Contexte du jeu
 
-Le jeu expose un objet global window.wildstatCoop (et un alias legacy window.wildwoodCoop) via :
-js
+### Stack
+- **Frontend** : modules ES, bundles `coop-client.*.js` + `game.*.js`
+- **Backend** : **SpacetimeDB** (`maincloud.spacetimedb.com`, database `wildwood-coop`)
+- **Auth** : JWT SpacetimeDB stocké dans `localStorage` (clés `auth_token/spacetimeauth_id_token_v1`, etc.)
+- **Communication** : WebSocket binaire (BSATN), **pas** du JSON
+- **Mobs** : **100% simulés côté client**. Le serveur valide uniquement la "crédibilité" des kills (position cohérente, arme équipée, etc.)
 
+### Maps connues
+- **`town`** : hub principal, pas de portails vers les zones de jeu. Arrivée à `(6120, 5110)`.
+- **`home_exterior`** : alias historique qui **redirige vers `town`** côté serveur.
+- **Maps de campagne** : `tutorial_forest`, `beginner_desert`, …, `ion_citadel` (15 maps).
+- **Maps Endless** : `endless_1`, `endless_2`, … (générées).
+
+### Mécaniques de déplacement
+1. **Portails in-world** : pour passer d'une zone de campagne à une autre (ou entre endless).
+   **Aucun portail ne relie town aux zones de jeu.**
+2. **Bouton menu « Home »** : seul moyen de rentrer en town depuis une zone.
+   Appelle `changeMap("town", player.x, player.y)`.
+
+---
+
+## 2. Architecture de l'API du jeu
+
+Le jeu expose un objet global **`window.wildstatCoop`** (et un alias legacy `window.wildwoodCoop`) via :
+
+```js
 Object.defineProperty(window, 'wildstatCoop', {
   value: wildstatCoop,
   writable: false,
@@ -27,13 +57,12 @@ Object.defineProperty(window, 'wildstatCoop', {
   enumerable: true
 });
 
-Cet objet est figé (Object.freeze) : ses méthodes ne peuvent pas être remplacées. Il est posé à la fin du chargement du module wildstat-coop.ts, donc après la connexion SpacetimeDB initiale.
-
-Méthodes utiles (non exhaustif) :
+L'objet est figé (Object.freeze). Il est posé après la connexion SpacetimeDB initiale.
+Méthodes utiles
 Méthode	Signature	Usage
 isConnected()	() → boolean	Vérifier la connexion au serveur
 localState()	() → {x, y, facing, speed, moving, mapId}	Position + map actuelles
-localIdentity()	() → string	Identité du joueur
+localIdentity()	() → string	Identité du joueur (hex)
 changeMap(mapId, x, y)	(string, number, number) → Promise<boolean>	Changer de map (mécanique du bouton Home)
 findTeleportPlayer(query)	(string) → Promise<{identity, mapId}>	Dev uniquement
 devTeleportToPlayer(id, mapId)	(string, string) → Promise<boolean>	Dev uniquement
@@ -42,207 +71,463 @@ syncMovementState(x, y, vx, vy, source, force, area, extra)	multiple	Envoi posit
 useTownDoor(index)	(number) → Promise	Entrer/sortir d'un bâtiment en town
 fallIntoWell()	() → Promise	Retour place de town (puits)
 sendChatMessage(...)		Chat
-startResearch(id), startItemUpgrade(...), mineNode(...)		Actions de jeu
+startResearch(id)	(id) → Promise	Lancer une recherche
+startItemUpgrade(slot, itemId, position)		Upgrade un item
+mineNode(x, y)		Miner
 
-⚠️ Les callbacks setOn* (ex: setOnItemDrop) sont réservés au jeu lui-même : ils ne peuvent être revendiqués qu'une fois. Ne jamais les utiliser dans un userscript.
-2.3 Maps connues
+⚠️ Les callbacks setOn* (ex: setOnItemDrop) sont réservés au jeu lui-même. Ils ne peuvent être revendiqués qu'une fois. Ne jamais les utiliser dans un userscript.
+Structure d'un mob (EnemyState)
 
-    town : hub principal, pas de portails vers les zones de jeu. Arrivée à (6120, 5110).
-
-    home_exterior : alias historique qui redirige vers town côté serveur. Ne pas utiliser directement, préférer town.
-
-    Maps de campagne : tutorial_forest, beginner_desert, …, ion_citadel (15 maps).
-
-    Maps Endless : endless_1, endless_2, … (générées).
-
-2.4 Mécaniques de déplacement (deux systèmes distincts)
-
-    Portails in-world : pour passer d'une zone de campagne à une autre (ou entre endless). Le joueur marche jusqu'au portail, le traverse, la map change. Aucun portail ne relie town aux zones de jeu.
-
-    Bouton menu « Home » : seul moyen de rentrer en town depuis une zone. Appelle changeMap("town", player.x, player.y). Le jeu mémorise la map de départ (homeDeparture) pour le bouton « Retour », mais ce champ n'est pas exposé dans l'API publique.
-
-2.5 Validation serveur
-
-changeMap est validé côté serveur :
-
-    La position passée doit être valide pour la map cible (cohérence avec les murs, portails, etc.)
-
-    changeMap("endless_8", ...) depuis town échoue avec "Move closer to the portal" — il faut passer par le picker de voyage (mécanique UI)
-
-    changeMap("town", player.x, player.y) depuis n'importe où fonctionne (c'est le bouton Home natif)
-
-3. Le problème du CSP et sa solution
-3.1 Le CSP du site
-
-Le site impose :
+Capturée via le hook Array, 38 clés dont :
+Clé	Type	Usage
+x, y	number	Position
+vx, vy	number	Vélocité
+r	number	Rayon (hitbox)
+hp, maxHp	number	Santé
+dead	boolean	Mort
+engaged	boolean	En combat
+leashing	boolean	En retour (ignore)
+aggroTargetId	string	Cible (hex identity ou "local-player")
+aggroRadius	number	Zone d'aggro
+leashRange	number	Portée max
+speed	number	Vitesse
+type, campName	string	Type et camp
+generatedBoss	boolean	Boss
+3. Le problème du CSP et de l'isolation
+Le CSP du site
 text
 
 script-src 'self' 'unsafe-eval'
 
 Conséquences :
 
-    ❌ Les scripts injectés dynamiquement (<script src="...">, <script>inline</script>) sont bloqués, même depuis la console DevTools.
+    ❌ Les scripts injectés dynamiquement (<script src>, <script>inline</script>) sont bloqués
 
-    ❌ GM_addElement('script', {...}) de Tampermonkey est bloqué sur Chrome et Firefox.
+    ❌ GM_addElement('script', {...}) est bloqué sur Chrome ET Firefox
 
-    ❌ unsafeWindow.eval(...) depuis un userscript classique est bloqué.
+    ❌ unsafeWindow.eval(...) depuis un userscript classique est bloqué
 
-    ✅ 'unsafe-eval' autorise eval() dans le contexte de la page, mais pas dans la sandbox isolée du userscript.
+    ✅ 'unsafe-eval' autorise eval() dans le contexte de la page, mais pas dans la sandbox du userscript
 
-3.2 Isolation Tampermonkey
+L'isolation des userscripts
+Gestionnaire	Comportement
+Tampermonkey (sandbox)	window isolé, unsafeWindow = proxy qui ne suit pas les ajouts dynamiques
+Tampermonkey (@sandbox JavaScript, Firefox)	USERSCRIPT_WORLD, bypass le CSP, mais Xray bloque les écritures cross-context
+Violentmonkey (@grant none)	window = window de la page, mais Xray bloque quand même les écritures
+Violentmonkey (@grant unsafeWindow)	unsafeWindow = window de la page, mais Xray bloque les écritures
 
-Par défaut, un userscript tourne dans une sandbox dont window est un proxy isolé de la vraie window de la page. unsafeWindow pointe vers la vraie window, mais :
-
-    Sur Chrome : unsafeWindow est un proxy qui ne propage pas les ajouts dynamiques (Object.defineProperty faits après l'exécution du userscript ne sont pas visibles).
-
-    Sur Firefox : unsafeWindow est soumis à la Xray Vision qui cache aussi les ajouts dynamiques.
-
-3.3 ✅ La solution qui marche (Firefox) : @sandbox JavaScript
-
-Firefox uniquement. Crée un contexte USERSCRIPT_WORLD qui bypass le CSP et donne accès à la vraie page via unsafeWindow.wrappedJSObject.
-
-En-tête Tampermonkey :
-text
-
-// @sandbox JavaScript
-// @grant unsafeWindow
-
-Code d'accès :
-js
-
-const pageWindow = typeof unsafeWindow !== 'undefined'
-  ? (unsafeWindow.wrappedJSObject || unsafeWindow)
-  : window;
-
-const getCoop = () => pageWindow.wildstatCoop || pageWindow.wildwoodCoop || null;
-
-Attendre que l'API soit prête :
-js
-
-function waitForCoopReady() {
-  return new Promise((resolve) => {
-    const check = () => {
-      const c = getCoop();
-      if (c && c.isConnected && c.isConnected()) return resolve(c);
-      setTimeout(check, 300);
-    };
-    check();
-  });
-}
-
-3.4 ❌ Ce qui ne marche pas (à ne pas réessayer)
+Xray Vision (Firefox) : barrière de sécurité qui empêche un userscript de lire/écrire dans les objets de la page (fonctions, prototypes, objets complexes). Les strings et nombres passent, mais pas les objets.
+Ce qui marche / ce qui ne marche pas
 Tentative	Firefox	Chrome
 @grant none + window.wildstatCoop	❌ sandbox	❌ sandbox
 @grant unsafeWindow + unsafeWindow.wildstatCoop	❌ Xray	❌ proxy
 GM_addElement('script', {textContent})	❌ CSP	❌ CSP
 unsafeWindow.eval(code)	❌ CSP	❌ CSP
 Injection <script> inline	❌ CSP	❌ CSP
-Injection <script src="data:...">	❌ CSP	❌ CSP
 Blob + <script src="blob:...">	❌ CSP	❌ CSP
-3.5 Chrome — non résolu
+@sandbox JavaScript + unsafeWindow.wrappedJSObject	✅ API accessible	N/A
+pageWindow.eval() depuis @sandbox JavaScript	✅ hook installé	N/A
+pageWindow.__wildpote_chasers_json__ (string)	✅ lisible cross-context	N/A
+La solution finale
 
-Sur Chrome, @sandbox JavaScript n'existe pas. Le CSP bloque toutes les méthodes d'injection. Statut : non supporté pour l'instant.
+Firefox uniquement (Chrome non supporté pour l'instant) :
 
-Pistes futures :
+    @sandbox JavaScript dans Violentmonkey (ou Tampermonkey)
 
-    Extension Chrome dédiée (utilisant chrome.scripting.executeScript avec world: 'MAIN')
+    @grant unsafeWindow
 
-    Attendre que Tampermonkey expose un équivalent Chrome de @sandbox JavaScript
+    pageWindow = unsafeWindow.wrappedJSObject || unsafeWindow
 
-4. Le bot actuel (V8.0 — Firefox)
-4.1 Architecture
+    pageWindow.eval(code) pour injecter le hook dans la page
 
-    Fichier unique : WildPote.user.js (Tampermonkey)
+    Le hook écrit dans pageWindow.__wildpote_chasers_json__ (string JSON)
 
-    Pas d'injection externe : tout le code est dans le userscript (contourne le CSP par @sandbox JavaScript)
+    Le sandbox lit pageWindow.__wildpote_chasers_json__ et parse via JSON.parse()
 
-    Pas d'interception WebSocket : on utilise l'API wildstatCoop directement
+4. Architecture du bot
+Fichiers
 
-    Pas de callbacks réservés : on ne touche à aucun setOn*, donc compatible avec WildBot et autres scripts
+    WildPote.user.js — userscript unique (Violentmonkey, Firefox)
 
-4.2 Fonctionnalités
-Bouton	Action	Mécanique
-🏠 Home	changeMap('town', x, y)	Identique au bouton menu natif
-🗺️ Voyage	Détecte le picker natif ouvert	Nécessite de marcher jusqu'au portail (peu fiable en bot)
-📍 État	Affichage live de localState()	Polling 500ms
-4.3 Limitations connues
+    docs/ARCHITECTURE.md — cette doc
 
-    Voyage picker peu fiable : le picker ne s'ouvre qu'en marchant sur le portail de town (4780, 3635). Un bot ne peut pas s'y rendre facilement sans simuler le clavier.
+Structure du userscript
+text
 
-    Pas de retour automatique : le champ homeDeparture n'est pas exposé ; le bot doit mémoriser lui-même la map de départ s'il veut proposer un « Retour ».
+┌─ En-tête Violentmonkey ────────────┐
+│ @match wildstatmmo.com             │
+│ @grant unsafeWindow                │
+└────────────────────────────────────┘
+              ↓
+┌─ pageWindow = unsafeWindow ────────┐
+│ Accès à la vraie window            │
+└────────────────────────────────────┘
+              ↓
+┌─ installerHookArray() ─────────────┐
+│ pageWindow.eval(code)              │
+│ → hook installé DANS la page       │
+│ → écrit __wildpote_chasers_json__  │
+└────────────────────────────────────┘
+              ↓
+┌─ boucleKiting() (50ms) ────────────┐
+│ Lit __wildpote_chasers_json__      │
+│ JSON.parse → chasers               │
+│ Calcule orbite                     │
+│ Envoie touches via canvas          │
+└────────────────────────────────────┘
+              ↓
+┌─ UI (onglets) ─────────────────────┐
+│ FARM / QUEST / KITING / MISC       │
+│ MISC → bouton "Copier diagnostic"  │
+└────────────────────────────────────┘
 
-    Chrome non supporté : voir §3.5.
+Onglets de l'UI
+Onglet	Statut	Contenu
+FARM	À peupler	Mode campaign/reflect/aggro/soul, build, sliders
+QUEST	À peupler	Tracker, bouton GO
+KITING	✅ Fonctionnel	Toggle, stats live, config, anti-stuck
+MISC	✅ Fonctionnel	État, diagnostic, bouton copier
+Persistance (localStorage)
+Clé	Valeur	Défaut
+wildpote_kiting	'true' / 'false'	false
+wildpote_antistuck	'true' / 'false'	true
+wildpote_logs	'true' / 'false'	false
+wildpote_pos	{top, left}	coin haut-droite
+wildpote_tab	'kiting' etc.	'kiting'
+wildpote_collapsed	'true' / 'false'	false
+5. Le hook Array cross-context
+Principe
 
-5. Développement — workflow
-5.1 Tester une modification
+Le hook est installé dans la page via pageWindow.eval(). Il intercepte .forEach(), .some(), .map(), .filter() sur Array.prototype, filtre les tableaux qui ressemblent à des mobs, et calcule les chasseurs.
 
-    Éditer WildPote.user.js dans Tampermonkey (icône → Edit → Ctrl+S)
+Il écrit le résultat dans pageWindow.__wildpote_chasers_json__ (string JSON), ce qui contourne Xray.
+Code du hook (simplifié)
+javascript
 
-    Recharger la page du jeu (F5)
+(function() {
+  if (window.__wildpote_hook_installed__) return;
+  window.__wildpote_hook_installed__ = true;
 
-    Ouvrir la console (F12) → logs [WildPote]
+  const origForEach = Array.prototype.forEach;
+  const origSome = Array.prototype.some;
+  const origMap = Array.prototype.map;
+  const origFilter = Array.prototype.filter;
 
-    L'UI apparaît en haut à gauche
+  let derniereCaptureTs = 0;
 
-5.2 Debug dans la console de la page
+  function tryCapture(arr) {
+    const now = performance.now();
+    if (now - derniereCaptureTs < 50) return;  // Throttle 50ms
 
-Pendant que le userscript tourne, la console DevTools n'a pas accès à unsafeWindow (c'est un objet Tampermonkey). Mais elle a accès à window.wildstatCoop directement (c'est le contexte de la page). Donc pour tester des appels :
-js
+    if (arr.length === 0 || arr.length > 300) return;
+    const first = arr[0];
+    if (!first || typeof first !== 'object' || !first.hp || !first.x) return;
 
-// Dans la console DevTools de la page (pas Tampermonkey)
-window.wildstatCoop.isConnected()
-window.wildstatCoop.localState()
-await window.wildstatCoop.changeMap('town', 100, 100)
+    derniereCaptureTs = now;
 
-⚠️ Redéclaration : si tu fais plusieurs tests, const c = window.wildstatCoop plante la 2e fois. Utilise (async () => { ... })() pour isoler.
-5.3 Erreurs courantes
+    try {
+      const coop = window.wildstatCoop;
+      if (!coop || !coop.isConnected()) return;
+      const player = coop.localState();
+      const identity = coop.localIdentity();
+      if (!player) return;
+
+      const chasers = [];
+      let engagedCount = 0;
+      for (let i = 0; i < arr.length; i++) {
+        const e = arr[i];
+        if (e.dead) continue;
+        if (e.engaged) engagedCount++;
+        if (!e.engaged || e.leashing) continue;
+        if (identity && e.aggroTargetId !== identity) continue;
+        const dist = Math.hypot(e.x - player.x, e.y - player.y);
+        if (dist < 600) {
+          chasers.push({ x: e.x, y: e.y, r: e.r || 20, dist });
+        }
+      }
+
+      chasers.sort((a, b) => a.dist - b.dist);
+      const top5 = chasers.slice(0, 5);
+
+      window.__wildpote_chasers__ = top5;
+      window.__wildpote_chasers_json__ = JSON.stringify(top5);
+      window.__wildpote_enemies_count__ = arr.length;
+      window.__wildpote_engaged_count__ = engagedCount;
+      window.__wildpote_last_capture_ts__ = Date.now();
+    } catch (err) {
+      // silencieux
+    }
+  }
+
+  Array.prototype.forEach = function(...args) {
+    if (this.length > 0 && this.length < 300) tryCapture(this);
+    return origForEach.apply(this, args);
+  };
+  Array.prototype.some = function(...args) {
+    if (this.length > 0 && this.length < 300) tryCapture(this);
+    return origSome.apply(this, args);
+  };
+  Array.prototype.map = function(...args) {
+    if (this.length > 0 && this.length < 300) tryCapture(this);
+    return origMap.apply(this, args);
+  };
+  Array.prototype.filter = function(...args) {
+    if (this.length > 0 && this.length < 300) tryCapture(this);
+    return origFilter.apply(this, args);
+  };
+
+  console.log('[WildPote-Hook] Hook forEach/some/map/filter installé (throttled)');
+})();
+
+Pourquoi throttle 50ms ?
+
+Sans throttle, le hook s'exécute des milliers de fois par seconde (18 701 appels en 2s mesurés). Firefox finit par planter ou freezer. Le throttle limite à 20 captures par seconde, largement suffisant pour le kiting.
+Pourquoi pageWindow.eval et pas <script> ?
+
+    <script> est bloqué par CSP
+
+    pageWindow.eval est autorisé par 'unsafe-eval' dans le CSP
+
+    pageWindow.eval s'exécute dans le contexte de la page (accès total à Array.prototype, window.wildstatCoop, etc.)
+
+Pourquoi __wildpote_chasers_json__ (string) et pas __wildpote_chasers__ (array) ?
+
+    __wildpote_chasers__ = tableau d'objets créés dans la page → Xray bloque la lecture depuis le sandbox
+
+    __wildpote_chasers_json__ = string JSON → accessible partout (Xray ne bloque pas les strings)
+
+6. Le kiting
+Principe (porté de auto-farm-dodge.ts du jeu)
+
+Le jeu a un système de kiting désactivé (AUTO_FARM_EVASION = false), mais tout le code est présent dans auto-farm-dodge.ts. On l'a porté dans WildPote.
+
+Idée : les chasseurs courent plus vite que le joueur (+25 u/s), mais tournent lentement (ENEMY_CHASE_TURN_RATE = 6 rad/s). Si le joueur tourne en cercle de rayon R, le chasseur "settle" sur un cercle plus petit à l'intérieur, en traînant, et ne le rattrape jamais.
+Formule clé (orbitTrail)
+javascript
+
+function orbitTrail(radius, speed, chaseSpeed, turnRate = 6) {
+  const spin = speed / radius;
+  const lag = Math.atan(spin / turnRate);
+  const inner = chaseSpeed / (spin * Math.sqrt(1 + (spin / turnRate) ** 2));
+  const square = radius * radius - (inner * Math.cos(lag)) ** 2;
+  return square < 0 ? null : inner * Math.sin(lag) + Math.sqrt(square);
+}
+
+Retourne la distance de traînée d'un chasseur qui poursuit un joueur tournant en cercle de rayon radius à vitesse speed. null si le chasseur peut rattraper.
+Sélection du rayon (orbitRadii)
+javascript
+
+function orbitRadii(speed, chaseSpeed, r, chasers, maxRadius) {
+  // Calcule le "needed" : distance minimale pour être safe
+  const widest = Math.max(...chasers.map(c => c.r || 20));
+  const mean = chasers.reduce((s, c) => s + (c.r || 20), 0) / chasers.length;
+  const needed = r + widest + ORBIT_CLEARANCE + ORBIT_CROWDING * mean * Math.sqrt(chasers.length - 1);
+
+  // Cherche la "bande" de rayons qui donnent trail >= needed
+  let low = Infinity, high = -Infinity;
+  for (let radius = MIN_LOOP; radius <= maxRadius; radius += 2) {
+    const trail = orbitTrail(radius, speed, Math.max(speed, chaseSpeed));
+    if (trail === null) break;
+    if (trail >= needed) { low = Math.min(low, radius); high = radius; }
+  }
+
+  // Prend 3 rayons dans la bande (band share 0.7, 0.4, 0.95) + des wide loops
+  // ...
+}
+
+Constantes clés
+Constante	Valeur	Rôle
+ENEMY_CHASE_TURN_RATE	6	Rad/s, vitesse de rotation des mobs
+ORBIT_CLEARANCE	6	Marge de sécurité
+ORBIT_CROWDING	0.55	Facteur de foule
+ORBIT_BAND_SHARE	0.7	Où dans la bande prendre le rayon
+WIDE_LOOPS	[220, 170, 130]	Rayons de secours
+MIN_LOOP	40	Rayon minimum
+NOT_HOLDING	150	Pénalité si le rayon ne tient pas
+ENTRY_COST	15	Pénalité si entrée mauvaise direction
+ORBIT_LEAD	0.15	Avance sur l'orbite
+CHASE_SPEED_BONUS	25	Vitesse mob = joueur + 25
+KITE_GAP	60	Distance minimale (pas utilisé actuellement)
+KITE_ROOM	160	Distance déclencheur du kiting
+Boucle kiting (50ms)
+
+    Vérifie kitingActif, estMort(), dernierInputJoueur (< 1.5s), coop.isConnected()
+
+    Lit pageWindow.__wildpote_chasers_json__ → JSON.parse → chasers
+
+    Si chasers.length === 0 → état attente
+
+    Calcule plusProche (min des dist - r - PLAYER_RADIUS)
+
+    Si plusProche >= KITE_ROOM → état safe (pas de kiting)
+
+    Anti-stuck : si bloqué > 2s → relâche + change de direction
+
+    Recalcule l'orbite si absente ou trop loin (> 50% de déviation)
+
+    Si orbite → calcule orbitStep (point à viser sur l'orbite) → envoie les touches
+
+Envoi des touches
+javascript
+
+function envoyerTouches(touchesVoulues) {
+  const canvas = getCanvas();
+  if (!canvas) return;
+  if (document.activeElement !== canvas) canvas.focus();
+
+  for (const t of touchesVoulues) {
+    if (!touchesActives.has(t)) {
+      canvas.dispatchEvent(new KeyboardEvent('keydown', {
+        key: t, code: t, keyCode: KEYCODES[t], which: KEYCODES[t],
+        bubbles: true, cancelable: true
+      }));
+      touchesActives.add(t);
+    }
+  }
+  for (const t of touchesActives) {
+    if (!touchesVoulues.includes(t)) {
+      canvas.dispatchEvent(new KeyboardEvent('keyup', {
+        key: t, code: t, keyCode: KEYCODES[t], which: KEYCODES[t],
+        bubbles: true, cancelable: true
+      }));
+      touchesActives.delete(t);
+    }
+  }
+}
+
+Le canvas doit avoir le focus (canvas.focus()) pour que les touches soient prises en compte.
+Direction → touches
+javascript
+
+function directionVersTouches(angleRad) {
+  const deg = (angleRad * 180 / Math.PI + 360) % 360;
+  const secteurs = [
+    { min: 337.5, max: 22.5, touches: ['ArrowRight'] },
+    { min: 22.5, max: 67.5, touches: ['ArrowDown', 'ArrowRight'] },
+    { min: 67.5, max: 112.5, touches: ['ArrowDown'] },
+    // ... 8 secteurs
+  ];
+  for (const s of secteurs) {
+    if (s.min > s.max) { if (deg >= s.min || deg < s.max) return s.touches; }
+    else if (deg >= s.min && deg < s.max) return s.touches;
+  }
+  return ['ArrowRight'];
+}
+
+Compatibilité autofarm
+
+Les touches s'ajoutent au mouvement de l'autofarm (elles ne le remplacent pas). Le serveur accepte les kills car le perso reste à portée du camp (validé par le puppet plan).
+
+Test : baseline autofarm seul 5s = 1054 unités. Avec ArrowUp maintenu 5s = 1945 unités. Les deux se combinent.
+7. Home et voyage
+Home (retour town)
+
+Le bouton « Home » du jeu fait :
+javascript
+
+changeMap("town", player.x, player.y)
+
+C'est la seule mécanique légale pour rentrer en town depuis une zone de jeu (aucun portail).
+
+Test : changeMap("town", 3294, 2673) depuis endless_8 → true, atterrit en town (6120, 5110).
+Voyage (retour à la map précédente)
+
+Le champ homeDeparture n'est pas exposé dans wildstatCoop (il est interne à mapController).
+
+Solution : le bot doit mémoriser lui-même la map avant chaque Home (via polling de localState().mapId).
+travelFromHome
+
+travelFromHome n'est pas exposé non plus. Le bouton « Retour » du jeu passe par le picker de voyage (dialogue HTML natif), qui s'ouvre quand on marche sur le portail de town (4780, 3635).
+
+Non implémenté dans WildPote V10.5 (peu fiable en bot).
+changeMap — validation serveur
+
+    changeMap("endless_8", x, y) échoue avec "Move closer to the portal" si on n'est pas près d'un portail
+
+    changeMap("town", x, y) fonctionne depuis n'importe où
+
+    changeMap("home_exterior", x, y) redirige vers town
+
+8. Debug et diagnostic
+Bouton "📋 Copier diagnostic"
+
+Dans l'onglet MISC, ce bouton copie dans le presse-papier :
+
+    Version du bot
+
+    État du hook (installé, actif)
+
+    Compteurs (__wildpote_enemies_count__, __wildpote_engaged_count__, __wildpote_last_capture_ts__)
+
+    Chasseurs JSON (les 5 plus proches)
+
+    État API (isConnected, localState)
+
+    Stats kiting (Chasseurs, Plus proche, Orbite, Touches, État)
+
+    Config (toggles, KITE_ROOM, touches actives)
+
+    Historique des 200 derniers logs
+
+Utile pour partager l'état du bot quand quelque chose ne marche pas.
+Logs [WildPote]
+
+Filtrer la console sur [WildPote] pour voir les logs du bot. Filtrer sur [WildPote-Hook] pour voir les logs du hook (dans la page).
+Logs Kiting: (activés par "Logs détaillés")
+text
+
+[22:49:04.434] Kiting: 5 chasseurs, gap=30, seuil=160, orbite=r=149
+[22:49:04.637] Nouvelle orbite r=149 dir=-1
+[22:49:05.054] Kiting: 4 chasseurs, gap=17, seuil=160, orbite=r=149
+
+Erreurs courantes
 Message	Cause	Solution
-Content-Security-Policy : ... script-src-elem	Injection <script> bloquée	Utiliser @sandbox JavaScript (Firefox)
-wildstatCoop: undefined	API pas encore exposée ou sandbox isolée	Attendre (waitForCoopReady) ou passer en @sandbox JavaScript
-Move closer to the portal	changeMap vers une map de jeu sans portail proche	Seul changeMap('town', ...) marche depuis n'importe où
-Invalid teleport position	Position invalide pour la map cible	Passer player.x, player.y actuels
-6. Pistes d'extension
-6.1 Auto-farm (complexe)
-
-Nécessite de simuler le clavier (KeyboardEvent sur document) pour déclencher les déplacements. Le jeu a son propre auto-farm natif — mieux vaut le configurer via ses switches que réinventer.
-6.2 Voyage automatisé (moyen)
-
-Simuler le clavier pour marcher jusqu'au portail de town, puis laisser le picker s'ouvrir et cliquer sur une destination. Fragile.
-6.3 Actions directes (simple)
-
-Utiliser les reducers exposés :
-
-    startResearch(id) — lancer une recherche
-
-    startItemUpgrade(slot, itemId, position) — upgrade un item
-
-    mineNode(x, y) — miner
-
-    sendChatMessage(...) — chat
-
-6.4 Lecture d'état (simple)
-
-    gemBalance(), inventorySlotsUnlocked(), savedProgress(), prestige(), activeResearch(), etc.
-
-    Toutes ces méthodes sont sûres (lecture seule) et ne sont pas des callbacks réservés.
-
-7. Historique des décisions
+Permission denied to access object	Xray bloque la lecture d'objets de la page	Utiliser JSON (déjà fait)
+Chasseurs: 0	Hook pas installé, ou pas en combat	Vérifier Hook visible: ✅ OUI, aller en combat
+État: safe permanent	Aucun mob à moins de KITE_ROOM	Attendre que les mobs approchent
+Firefox freeze	Hook trop coûteux	Vérifier le throttle (50ms), réduire les méthodes hookées
+Hook installé: ❌ NON	pageWindow.eval échoue	Vérifier CSP, @grant unsafeWindow
+9. Historique des décisions
 Version	Décision	Raison
-V1	Interception WebSocket via patch prototype.send	❌ Ne fonctionne pas (CSP + timing)
-V2-V5	Injection <script> externe (raw.githack)	❌ Bloqué par CSP
-V6	GM_addElement	❌ Bloqué par CSP
-V7	unsafeWindow.eval	❌ Bloqué par CSP
-V8	@sandbox JavaScript + unsafeWindow.wrappedJSObject	✅ Seule méthode fonctionnelle sur Firefox
-8. Ressources
+V1	Interception WebSocket via patch prototype.send	❌ CSP + timing
+V2-V5	Injection <script> externe (raw.githack)	❌ CSP
+V6	GM_addElement	❌ CSP
+V7	unsafeWindow.eval	❌ CSP
+V8	@sandbox JavaScript + unsafeWindow.wrappedJSObject	✅ Firefox uniquement
+V9	UI 4 onglets, Home global, persistance	✅
+V10.0-10.3	Hook Array via eval	✅ mais Xray bloque la lecture
+V10.4	Hook écrit JSON cross-context	✅ Xray contourné
+V10.5	Throttle 50ms + 4 méthodes + bouton diagnostic	✅ Firefox ne plante plus
+V11 (prévu)	FARM + QUEST peuplés	⏳
+10. Pistes futures
+Court terme
 
-    Code du bot : WildPote.user.js
+    Peupler FARM : mode campaign/reflect/aggro/soul, build, sliders Move At / Fight At
 
-    Ancien bot (référence pour les hooks et techniques) : WildBot.user.js (v12.9.3)
+    Peupler QUEST : tracker de quêtes, bouton GO
 
-    Dépôt GitHub : github.com/vincentzell/WildPote
+    Améliorer KITING : mode circle vs back-off, config KITE_ROOM/KITE_GAP
 
-    Documentation SpacetimeDB : spacetimedb.com/docs
+    Fix anti-stuck : relâcher toutes les touches avant de changer de direction (en cours)
 
-    Documentation Tampermonkey : tampermonkey.net/documentation
+    Fix instabilité orbite : garder l'orbite plus longtemps (en cours)
 
-    Doc MDN sur la Xray Vision Firefox : developer.mozilla.org/en-US/docs/Mozilla/Gecko/Script_security#Xray_vision
+Moyen terme
+
+    Retour map : mémoriser la map avant Home, proposer un bouton Retour
+
+    Auto-farm : configurer les switches de l'autofarm ingame via l'UI
+
+    Auto-research : lancer des recherches automatiquement
+
+    Auto-upgrade : lancer des upgrades d'items
+
+Long terme
+
+    Chrome : trouver une solution pour Chrome (extension dédiée, ou attendre une API)
+
+    Hooks canvas : intercepter CanvasRenderingContext2D.prototype.arc pour les zones d'attaque (AoE)
+
+    Kiting avancé : mode planEvasion complet (esquive + orbite)
+
+    Auto-prestige : gérer les prestiges automatiquement
