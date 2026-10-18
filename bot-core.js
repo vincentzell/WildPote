@@ -3,10 +3,7 @@
 
   if (document.getElementById('wildpote-ui')) return;
 
-  // Stockage local de la dernière position pour le retour
-  let savedPosition = null;
-
-  // --- Création de l'interface UI ---
+  // --- Création de l'UI ---
   const ui = document.createElement('div');
   ui.id = 'wildpote-ui';
   ui.innerHTML = `
@@ -17,7 +14,7 @@
     <div id="wildpote-body">
       <button id="btn-home" class="wp-btn">🏠 Teleport Home</button>
       <button id="btn-return" class="wp-btn" disabled>🔙 Retour</button>
-      <div id="wp-status">Connecté</div>
+      <div id="wp-status">Attente WS...</div>
     </div>
   `;
 
@@ -76,10 +73,21 @@
     toggleBtn.textContent = isHidden ? '_' : '+';
   });
 
-  // --- Récupération de la Socket WebSocket ---
+  // --- Fonction de récupération de la socket ---
   function getActiveSocket() {
     return window.__WILDPOTE_WS__ || null;
   }
+
+  // Mettre à jour l'affichage du statut si la socket est prête
+  setInterval(() => {
+    const ws = getActiveSocket();
+    const statusEl = document.getElementById('wp-status');
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      if (statusEl.textContent.includes('Attente WS')) {
+        statusEl.textContent = 'WS : Connecté !';
+      }
+    }
+  }, 1000);
 
   // --- Actions ---
   const btnHome = document.getElementById('btn-home');
@@ -90,9 +98,9 @@
     const ws = getActiveSocket();
 
     if (ws && ws.readyState === WebSocket.OPEN) {
-      statusEl.textContent = 'Téléportation Home...';
+      statusEl.textContent = 'Envoi Teleport Home...';
 
-      // Envoi du reducer officiel change_map vers la map "home_exterior"
+      // Reducer officiel change_map vers "home_exterior"
       const payload = JSON.stringify({
         reducer: "change_map",
         args: {
@@ -105,11 +113,12 @@
         statusEl.textContent = 'Demande envoyée !';
         btnReturn.disabled = false;
       } catch (e) {
-        console.error('[WildPote] Erreur envoi WS:', e);
-        statusEl.textContent = 'Erreur WS';
+        console.error('[WildPote] Erreur d\'envoi WS:', e);
+        statusEl.textContent = 'Erreur lors de l\'envoi';
       }
     } else {
-      statusEl.textContent = 'Socket non connectée';
+      statusEl.textContent = 'Socket non trouvée/ouverte';
+      console.warn('[WildPote] Socket réseau non prête dans window.__WILDPOTE_WS__');
     }
   });
 
@@ -117,9 +126,8 @@
     const ws = getActiveSocket();
 
     if (ws && ws.readyState === WebSocket.OPEN) {
-      statusEl.textContent = 'Téléportation Town...';
+      statusEl.textContent = 'Envoi Retour Town...';
 
-      // Envoi du reducer change_map vers la carte centrale "town"
       const payload = JSON.stringify({
         reducer: "change_map",
         args: {
@@ -131,11 +139,11 @@
         ws.send(payload);
         statusEl.textContent = 'Retour envoyé !';
       } catch (e) {
-        console.error('[WildPote] Erreur envoi WS:', e);
-        statusEl.textContent = 'Erreur WS';
+        console.error('[WildPote] Erreur d\'envoi WS:', e);
+        statusEl.textContent = 'Erreur lors de l\'envoi';
       }
     } else {
-      statusEl.textContent = 'Socket non connectée';
+      statusEl.textContent = 'Socket non trouvée/ouverte';
     }
   });
 })();
