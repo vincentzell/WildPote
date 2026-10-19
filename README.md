@@ -1,105 +1,88 @@
+📄 WildPote — Documentation technique (v20.3)
+markdown
+
 WildPote — Documentation technique
 
 Bot pour WildStat MMO (wildstatmmo.com), un ARPG idle joué dans le navigateur.
 Le bot est injecté via Violentmonkey (userscript) et interagit avec l'API officielle du jeu.
 
-Version actuelle : 19.5 — Kiting, Home, Portails, Auto-quest, Auto-farm quêtes, Prestige
-Table des matières
+Version actuelle : 20.3 — Kiting, Portails, Auto-quest (tracker), Prestige, Gems
+Dernière mise à jour : v20.3
 
-    Contexte du jeu
-
-    Architecture de l'API du jeu
-
-    Le problème du CSP et de l'isolation
-
-    Architecture du bot
-
-    Le hook Array cross-context
-
-    Le kiting
-
-    Home et voyage — mécaniques serveur
-
-    Navigation par portails in-world ⭐
-
-    Auto-quest : routine complète ⭐
-
-    Debug et diagnostic
-
-    Historique des décisions
-
-    Pistes futures
+## Table des matières
 
 1. Contexte du jeu
-Stack
-
-    Frontend : modules ES, bundles coop-client.*.js + game.*.js
-
-    Backend : SpacetimeDB (maincloud.spacetimedb.com, database wildwood-coop)
-
-    Auth : JWT SpacetimeDB stocké dans localStorage
-
-    Communication : WebSocket binaire (BSATN), pas du JSON
-
-    Mobs : 100% simulés côté client. Le serveur valide uniquement la "crédibilité" des kills (position cohérente, arme équipée, etc.)
-
-Maps connues
-
-    town : hub principal, aucun portail vers les zones de jeu. Arrivée à (6120, 5110).
-
-    home_exterior : alias historique qui redirige vers town côté serveur.
-
-    Maps de campagne : tutorial_forest (1) → ion_citadel (15). Voir MAPS_ORDRE dans le bot.
-
-    Maps Endless : endless_1, endless_2, … générées procéduralement côté client ET serveur (même seed).
-
-Mécaniques de déplacement
-
-    Portails in-world : pour passer d'une zone de campagne à une autre, ou d'un endless à un autre.
-    Aucun portail ne relie town aux zones de jeu.
-
-    Bouton menu « Home » : seul moyen de rentrer en town depuis une zone.
-    Appelle changeMap("town", player.x, player.y).
-
 2. Architecture de l'API du jeu
-window.wildstatCoop
+3. Le problème du CSP et de l'isolation
+4. Architecture du bot (v20.3)
+5. Le hook Array cross-context
+6. Le kiting
+7. Voyage — mécaniques serveur
+8. Navigation par portails in-world
+9. Auto-farm quêtes v20.3 (tracker DOM)
+10. Debug et diagnostic
+11. Historique des décisions
+12. Pistes futures
 
-Objet global exposé après connexion SpacetimeDB. Figé (Object.freeze) et posé via Object.defineProperty(window, 'wildstatCoop', { writable: false, configurable: false }).
+---
 
-Méthodes utiles :
-Méthode	Signature	Usage
-isConnected()	() → boolean	Vérifier la connexion
-localState()	() → {x, y, facing, speed, moving, mapId}	Position serveur — STALE de ~1-2s ⚠️
-localIdentity()	() → string	Identité (hex)
-changeMap(mapId, x, y)	(string, number, number) → Promise<boolean>	Valide la position côté serveur
-dailyQuests()	() → { quests, guildName, bonus, ... }	Quêtes du jour
-prestige() / prestigeAccount()		Prestige
-claimDailyGemBonus()		Gemmes
-refreshDailyQuests()		Refresh quêtes
-useTownDoor(index)	(number) → Promise	Portes de town
-sendChatMessage(...), startResearch(id), startItemUpgrade(...), mineNode(x, y)		Autres
+## 1. Contexte du jeu
 
-⚠️ Ne jamais utiliser les setOn* (setOnItemDrop, etc.) : réservés au jeu, une seule revendication.
-Structure d'un mob (EnemyState)
+### Stack
 
-38 clés, capturées via le hook Array :
-Clé	Type	Usage
-x, y	number	Position
-vx, vy	number	Vélocité
-r	number	Rayon (hitbox)
-hp, maxHp	number	Santé
-dead	boolean	Mort
-engaged	boolean	En combat
-leashing	boolean	En retour (ignore)
-aggroTargetId	string	Cible (identity ou "local-player")
-aggroRadius, leashRange, speed	number	Config
-type, campName	string	Type et camp
-generatedBoss	boolean	Boss
-Serveur change_map — validation exacte
+- **Frontend** : modules ES, bundles `coop-client.*.js` + `game.*.js`
+- **Backend** : SpacetimeDB (maincloud.spacetimedb.com, database `wildwood-coop`)
+- **Auth** : JWT SpacetimeDB stocké dans localStorage
+- **Communication** : WebSocket binaire (BSATN), pas du JSON
+- **Mobs** : 100% simulés côté client. Le serveur valide uniquement la "crédibilité" des kills.
 
-Source : spacetimedb/src/map-travel.ts (voir changePlayerMap).
-typescript
+### Maps connues
 
+- `town` : hub principal, aucun portail vers les zones de jeu. Arrivée à (6120, 5110).
+- `home_exterior` : alias historique qui redirige vers `town` côté serveur.
+- Maps de campagne : `tutorial_forest` (1) → `ion_citadel` (15). Voir `MAPS_ORDRE` dans le bot.
+- Maps Endless : `endless_1`, `endless_2`, … générées procéduralement côté client ET serveur (même seed).
+
+### Mécaniques de déplacement
+
+- **Portails in-world** : pour passer d'une zone de campagne à une autre, ou d'un endless à un autre.
+- **Aucun portail ne relie town aux zones de jeu**.
+- **Bouton menu "Home"** (jeu natif, pas le bot) : seul moyen de rentrer en town depuis une zone.
+  Appelle `changeMap("town", player.x, player.y)`.
+
+---
+
+## 2. Architecture de l'API du jeu
+
+### `window.wildstatCoop`
+
+Objet global exposé après connexion SpacetimeDB. Figé (`Object.freeze`) et posé via `Object.defineProperty(window, 'wildstatCoop', { writable: false, configurable: false })`.
+
+**Méthodes utiles** :
+
+| Méthode | Signature | Usage |
+|---|---|---|
+| `isConnected()` | `() → boolean` | Vérifier la connexion |
+| `localState()` | `() → {x, y, facing, speed, moving, mapId}` | Position serveur — **STALE de ~1-2s** ⚠️ |
+| `localIdentity()` | `() → string` | Identité (hex) |
+| `changeMap(mapId, x, y)` | `(string, number, number) → Promise<boolean>` | Valide la position côté serveur |
+| `dailyQuests()` | `() → { quests, guildName, bonus, ... }` | Quêtes du jour (UI) |
+| `prestige()` / `prestigeAccount()` | | Prestige |
+| `claimDailyGemBonus()` | | Gemmes |
+| `refreshDailyQuests()` | | Refresh quêtes |
+| `useTownDoor(index)` | `(number) → Promise` | Portes de town |
+
+⚠️ **Ne jamais utiliser les `setOn*`** (`setOnItemDrop`, etc.) : réservés au jeu, une seule revendication.
+
+### Structure d'un mob (`EnemyState`)
+
+38 clés, capturées via le hook Array. Utilisées par le bot : `x`, `y`, `r`, `hp`, `maxHp`, `dead`, `engaged`, `leashing`, `aggroTargetId`, `type`, `campName`, `generatedBoss`, `reward.type` (via `ENEMY_TYPES[type]`).
+
+### Serveur `change_map` — validation exacte
+
+Source : `spacetimedb/src/map-travel.ts`.
+
+```typescript
 const sourcePortal = sourcePortals
   .filter(p => p.destination === mapId)
   .sort((a, b) => Math.hypot(x - a.x, y - a.y) - Math.hypot(x - b.x, y - b.y))[0];
@@ -117,15 +100,28 @@ export function portalUsePoint(portal: MapGatewayPortal) {
 }
 
 Avec height = 198, le point d'usage est à y - 63.36 (32% de la hauteur depuis le pied).
-
-⚠️ Conséquence majeure : changeMap doit être appelé avec une position dans la sphère de 125px du portalUsePoint. Le bot ne peut pas juste viser le pied du portail.
 Deux types de portails serveur
 
-1. Campaign maps (tutorial_forest … ion_citadel) : sourcePortals = MAP_PORTALS[current.mapId] → vient de CAMPAIGN_GATEWAYS (hardcodé dans shared/map-gateways.ts, pas exposé sur window).
+    Campaign maps (tutorial_forest … ion_citadel) : sourcePortals = MAP_PORTALS[current.mapId] → vient de CAMPAIGN_GATEWAYS (hardcodé dans shared/map-gateways.ts, pas exposé sur window).
 
-2. Endless maps (endless_N) : sourcePortals = generateMap(current.mapId).portals.map(p => ({...p, y: p.y - p.height * 0.32 })) → généré dynamiquement, les portails sont à (2400 ± 110, 2400) avec destination endless_(N-1) / endless_(N+1).
+    Layout par défaut : middleGateways(gatewayPoint(mapId), previous, next) :
 
-C'est pour ça que les transitions endless marchent sans CAMPAIGN_GATEWAYS : le serveur utilise generateMap(), pas la table campaign.
+        gatewayPoint(mapId) = GATEWAY_POINT_NUDGES[mapId] ?? MAP_MIDDLE (2400, 2400)
+
+        GATEWAY_POINT_NUDGES['tutorial_forest'] = { x: 2240, y: 2810 }
+
+        GATEWAY_POINT_NUDGES['intermediate_snowlands'] = { x: 2300, y: 2190 }
+
+        half = GATEWAY_PORTAL_SPACING / 2 = 110 si previous && next, sinon 0
+
+        Portail à (point.x ± half, point.y)
+
+        Tutorial Forest n'a pas de portail prev → half = 0, son unique portail next est à (2240, 2810) pile
+
+        Les maps tutorial_forest et beginner_desert ont des overrides map editor (MAP_EDITOR_GAMEPLAY_OVERRIDES) qui priment sur middleGateways
+
+    Endless maps (endless_N) : sourcePortals = generateMap(current.mapId).portals → généré dynamiquement, les portails sont à (2400 ± 110, 2400) avec useY = 2400 - 63.36, destination endless_(N-1) / endless_(N+1).
+
 3. Le problème du CSP et de l'isolation
 
 (inchangé depuis v10.5)
@@ -154,14 +150,8 @@ Solution finale (Firefox)
 
     Communication cross-context via strings JSON (Xray bloque les objets, pas les strings)
 
-4. Architecture du bot
-Fichiers
-
-    WildPote.user.js — userscript unique (Violentmonkey, Firefox)
-
-    docs/ARCHITECTURE.md — cette doc
-
-Structure v19.5
+4. Architecture du bot (v20.3)
+Structure
 text
 
 ┌─ En-tête Violentmonkey ────────────┐
@@ -193,17 +183,18 @@ text
 │ FARM / QUEST / KITING / MISC       │
 └────────────────────────────────────┘
 
-Onglets de l'UI
+Onglets de l'UI (v20.3)
 Onglet	Contenu
-FARM	Auto-prestige (toggle, bouton, timer)
-QUEST	Résumé quêtes, 3 actives, terminées, en attente, TEST PORTAILS (boutons prev/next, diag, debug), AUTO-FARM QUÊTES (toggle, logs copiables)
+FARM	Auto-prestige (toggle, bouton, timer, niveau)
+QUEST	Résumé (Terminées/Actives/Guild/Bonus), Quêtes actives (cartes colorées par stat), Terminées (collapsible), Auto-farm quêtes v20.3 (bouton Lancer/Arrêter dynamique, logs copiables)
 KITING	Toggle, diag kiting
-MISC	État (map, position serveur/minimap, source), logs, bouton HOME
+MISC	État (map, position serveur/minimap, source), logs
+
+⚠️ v20.3 : suppression du bouton HOME (relique), suppression TEST PORTAILS et TEST TRACKER (remplacés par wildpoteDebug en console).
 Persistance (localStorage)
 Clé	Valeur	Défaut
 wildpote_kiting	'true' / 'false'	false
 wildpote_antistuck	'true' / 'false'	true
-wildpote_logs	'true' / 'false'	false
 wildpote_pos	{top, left}	coin haut-droite
 wildpote_tab	'kiting' etc.	'kiting'
 wildpote_collapsed	'true' / 'false'	false
@@ -215,58 +206,52 @@ wildpote_prestige_time	timestamp ms	0
 wildpote_prestige_duree	string	null
 5. Le hook Array cross-context
 
-(inchangé, mais enrichi)
+(inchangé, mais voir §5.3 pour la précision portails)
 Trois hooks distincts
 
-1. Hook Array (Array.prototype.forEach/some/map/filter) → détecte les tableaux de mobs, calcule les 5 chasseurs les plus proches, écrit __wildpote_chasers_json__.
+    Hook Array (Array.prototype.forEach/some/map/filter) → détecte les tableaux de mobs, calcule les 5 chasseurs les plus proches, écrit __wildpote_chasers_json__.
 
-Throttle 50ms — sans lui, 18 701 appels en 2s mesurés, Firefox freeze.
+    Throttle 50ms.
 
-2. Hook Canvas minimap (CanvasRenderingContext2D.prototype.fill) → détecte le diamant blanc (joueur sur la minimap, 4 points, fillStyle === '#ffffff', avgDist entre 2 et 15, variance ≤ 2) et écrit __wildpote_minimap_json__.
+    Hook Canvas minimap (CanvasRenderingContext2D.prototype.fill) → détecte le diamant blanc (joueur sur la minimap) et écrit __wildpote_minimap_json__.
 
-⚠️ Position minimap = CLIENT, à jour. C'est la seule source fiable pour marcherVersDiag. localState() (serveur) a un lag de 1-2s qui casse la détection d'arrivée.
+    ⚠️ Position minimap = CLIENT, à jour. C'est la seule source fiable pour marcherVersDiag. localState() (serveur) a un lag de 1-2s.
 
-3. Hook __wildpote_getPortals__() → retourne les portails de la map courante :
+    Hook __wildpote_getPortals__() → retourne les portails de la map courante :
 
-    Endless : {x: 2290|2510, y: 2400, useY: 2400 - 63.36, destination: 'endless_(N±1)'} (useY officiel 0.32)
+        Endless : {x: 2290|2510, y: 2400, useY: 2400 - 63.36, destination: 'endless_(N±1)'} (useY officiel 0.32)
 
-    Campaign : lit MAP_EDITOR_GAMEPLAY_OVERRIDES puis CAMPAIGN_GATEWAYS (les deux ne sont pas exposés sur window en pratique, donc retourne portals: null → le bot fallback sur MAPS_ORDRE + fallbackPortal)
+        Campaign : lit MAP_EDITOR_GAMEPLAY_OVERRIDES puis CAMPAIGN_GATEWAYS (les deux ne sont pas exposés sur window en pratique → retourne portals: null → le bot fallback sur MAPS_ORDRE + fallbackPortal corrigé v20.0.1)
 
+v20.0.1 — correction importante du fallback :
+
+Le fallback fallbackPortal() du bot utilise maintenant GATEWAY_POINT_NUDGES (les mêmes nudges que shared/map-gateways.ts) ET PORTAL_USE_RATIO = 0.32 (au lieu de 0.5) ET half = 0 pour tutorial_forest (pas de prev). Résultat : le bot vise (2240, 2746.64) au lieu de (2510, 2301) sur Tutorial Forest → transition OK.
 Pourquoi JSON et pas objet ?
 
 Xray Vision (Firefox) bloque la lecture cross-context des objets créés dans la page. Les strings JSON passent.
 Canvas focus — découverte v19.4
 
-Le canvas #gameGpu a aria-hidden="true" en permanence. Un élément aria-hidden ne peut pas recevoir le focus via canvas.focus(). Sans focus, les KeyboardEvent ne sont pas traités par les listeners du jeu (même dispatchés sur canvas).
+Le canvas #gameGpu a aria-hidden="true" en permanence. Un élément aria-hidden ne peut pas recevoir le focus via canvas.focus(). Sans focus, les KeyboardEvent ne sont pas traités par les listeners du jeu.
 
-Fix :
-javascript
-
-if (canvasEl.getAttribute('aria-hidden') === 'true') {
-  canvasEl.setAttribute('data-wp-aria-hidden', 'true');
-  canvasEl.removeAttribute('aria-hidden');
-}
-
-Le bot retire aria-hidden au premier getCanvas(), ce qui permet canvas.focus() dans envoyerTouches().
+Fix : retirer aria-hidden au premier getCanvas(), forcer canvas.focus() dans envoyerTouches().
 6. Le kiting
 
 (inchangé, voir v10.5)
 
 Principe, formules orbitTrail/orbitRadii, sélection d'orbite, envoi des touches.
 
-Complément v19.5 : la boucle tourne à 100ms (au lieu de 50ms). Pendant navigationEnCours === true, la boucle ne fait rien (le bot navigue).
-7. Home et voyage — mécaniques serveur
+Complément v19.5 : la boucle tourne à 100ms. Pendant navigationEnCours === true, la boucle ne fait rien (le bot navigue).
+7. Voyage — mécaniques serveur
 Home (retour town)
 
 changeMap("town", x, y) — fonctionne depuis n'importe où, aucune validation de portail.
+
+⚠️ v20.3 : le bouton HOME du bot a été supprimé (relique). Utiliser le bouton HOME natif du jeu.
 Voyage vers une map de campagne
 
-Deux chemins possibles :
+Depuis town : changeMap(mapId, x, y) avec townPortalUsePoints(mapId) — tous les portails de town acceptent n'importe quelle destination débloquée.
 
-    Depuis town : changeMap(mapId, x, y) avec townPortalUsePoints(mapId) → tous les portails de town acceptent n'importe quelle destination débloquée.
-
-    Depuis une map de campagne : utiliser un portail in-world — voir section 8.
-
+Depuis une map de campagne : utiliser un portail in-world (voir §8).
 Unlock validation serveur
 typescript
 
@@ -276,67 +261,44 @@ if (campaignIndex > 0 && !campaignMapUnlocked(campaignIndex, currentProgress ?? 
 }
 
 Impossible d'entrer dans une map de campagne sans avoir battu le boss de la précédente.
-8. Navigation par portails in-world ⭐
-
-Le sujet le plus complexe du bot. Trois ans de tentatives pour comprendre pourquoi le bot ne franchissait pas les portails.
+8. Navigation par portails in-world
 Le problème initial
 
-Le bot marchait vers le portail, s'arrêtait "arrivé", mais rien ne se passait. Le serveur ne recevait jamais change_map (ou le recevait avec une position hors zone).
+Le bot marchait vers le portail, s'arrêtait "arrivé", mais rien ne se passait.
 Comprendre le client WildStat
 
-Découverte clé : le client de jeu ne déclenche pas change_map via une touche. Quand le joueur entre dans la zone d'un portail, le client de jeu détecte la collision et appelle change_map automatiquement.
+Le client de jeu ne déclenche pas change_map via une touche. Quand le joueur entre dans la zone d'un portail, le client détecte la collision et appelle change_map automatiquement. La collision doit être réelle (position du joueur dans le rayon de 125px du portalUsePoint).
+Trois bugs en cascade (résolus v19.x)
 
-MAIS : la collision doit être réelle (position du joueur dans le rayon de 125px du portalUsePoint). Si le joueur est juste au bord, la collision ne se déclenche pas toujours — soit par timing (frame suivante), soit par flottement de la position.
-Trois bugs en cascade
+    localState stale → utiliser getPositionInterpolee() (minimap client) pour la marche.
 
-Bug 1 — localState stale dans marcherVersDiag
+    Canvas aria-hidden = pas de focus = touches ignorées → retirer aria-hidden dans getCanvas().
 
-marcherVersDiag utilisait localState() (serveur) pour calculer la distance. Le serveur met à jour la position toutes les 1-2s. Le bot marchait pendant 4s vers une cible en pensant être à (2290, 2381) alors qu'il était déjà arrivé il y a 2s, ou encore à (2215, 2555).
+    Bot s'arrête "arrivé" mais hors zone → pushDirectionnel court (150ms) après arrived.
 
-Symptôme : dist=189px pendant 24s alors que le joueur bougeait côté client. Le bot ne détectait jamais dist < 40.
-
-Fix : utiliser getPositionInterpolee() (minimap client, à jour 60 fps) pour la marche. Garder localState() uniquement pour détecter le changement de mapId.
-
-Bug 2 — Canvas aria-hidden = pas de focus = touches ignorées
-
-Voir section 5. Sans aria-hidden retiré, canvas.focus() échoue, les KeyboardEvent dispatchés ne sont pas traités, le joueur ne bouge pas.
-
-Symptôme : le joueur reste immobile malgré les touches envoyées. Puis téléport au coin (17, 4783) après 25s (anti-AFK serveur).
-
-Fix : retirer aria-hidden dans getCanvas(), forcer canvas.focus() dans envoyerTouches().
-
-Bug 3 — Le bot s'arrête "arrivé" mais hors zone
-
-Avec dist < ARRIVAL_THRESHOLD_PX = 40 de la cible overshootée (2290, 2381), le joueur peut être à (2290, 2420) (au-delà de la cible mais toujours à dist < 40). Distance au portalUsePoint (2290, 2336.64) = sqrt(0² + 83²) = 83px. Dans la zone (125) mais juste au bord. La collision ne se déclenche pas toujours — soit par timing, soit parce que le jeu exige un mouvement continu.
-
-Fix v19.5 — push directionnel court
-
-Après arrived, le bot envoie une seule touche directionnelle (ArrowUp si le portail est au-dessus, ArrowDown sinon) pendant 150ms, puis relâche. Le joueur parcourt ~44px, entre franchement dans la sphère → collision garantie.
-javascript
-
-const posY = posArrivee?.y ?? (portal.baseUseY ?? portal.useY);
-const pushDir = (portal.baseUseY ?? portal.useY) < posY ? 'ArrowUp' : 'ArrowDown';
-await pushDirectionnel(pushDir, 150);
-
-Ce n'est PAS une touche d'interaction — c'est une touche directionnelle qui pousse physiquement le joueur dans la hitbox.
-Les fausses pistes explorées
-Tentative	Pourquoi ça a échoué
-Space, Enter, KeyE, KeyF, KeyR	❌ Ouvrent des panneaux UI (auto-farm, inventaire, quêtes). Space ouvre l'auto-farm — d'où le bug "fenêtre auto-farm à chaque portail".
-overshoot = 0	Le bot s'arrête trop tôt, la collision ne prend pas
-overshoot = 90 (plier)	Le bot sort de la zone 125px
-ARRIVAL_THRESHOLD_PX = 15	Trop précis, le bot n'atteint jamais la cible
-useY = y - 63.36 (official)	Fonctionne mais l'arrêt à dist < 40 ramène à 2381 → au bord
-Hardcoder CAMPAIGN_GATEWAYS	Pas nécessaire, le fallback MAPS_ORDRE marche
-Solution finale v19.5
+Solution finale (v19.5 + v20.0.1)
 text
 
 1. marcherVersDiag : position via minimap CLIENT (getPositionInterpolee)
 2. Fin de marche : dist < 40 de la cible overshootée (y + 45)
 3. Après arrived : push ArrowUp/ArrowDown 150ms
-4. Attendre change_map (le client appelle automatiquement quand le joueur entre vraiment dans la zone)
+4. Attendre change_map (le client appelle automatiquement)
 5. Détecter la transition via localState.mapId (polling 200ms, timeout 10s)
 
-Résultat mesuré : 15 portails endless traversés en 26s (1-2s par portail), 6 portails campaign en 12s.
+⚠️ v20.0.1 — Fix fallback (Tutorial Forest)
+
+Avant v20.0.1 : fallbackPortal('tutorial_forest', 'next') retournait (2510, 2301) (basé sur MAP_MIDDLE + half=110, useY = y - 0.5*198). Résultat : 570px à côté du vrai portail → transition échouée.
+
+Après v20.0.1 : fallbackPortal reproduit middleGateways() :
+
+    GATEWAY_POINT_NUDGES['tutorial_forest'] = { x: 2240, y: 2810 }
+
+    half = 0 (pas de prev)
+
+    PORTAL_USE_RATIO = 0.32 (au lieu de 0.5)
+
+    Résultat : (2240, 2746.64) + overshoot 45 = (2240, 2791.64) → ~18px du vrai portail → transition OK.
+
 trouverPortailVersCible — le routage
 javascript
 
@@ -344,215 +306,184 @@ javascript
    - Si un portail a destination === mapCible → match direct
    - Sinon → fallback MAPS_ORDRE
 2. Si getAllRealPortals échoue (campaign, hook retourne null) →
-   fallback MAPS_ORDRE + fallbackPortal
+   fallback MAPS_ORDRE + fallbackPortal v20.0.1
 
-Pour les campaign, getAllRealPortals retourne null (car CAMPAIGN_GATEWAYS n'est pas exposé). Le bot utilise fallbackPortal(mapId, direction) qui calcule (MAP_MIDDLE.x ± 110, MAP_MIDDLE.y - 99). Ça marche parce que les vrais portails campaign sont à (2400 ± 110, 2400) — c'est exactement la position que middleGateways utilise dans le code serveur (shared/map-gateways.ts).
-
-Pour les endless, getAllRealPortals retourne les vrais portails avec destinations endless_(N±1) → match direct garanti.
 Constantes clés
 Constante	Valeur	Rôle
-MAP_PORTAL_USE_RANGE	125	Rayon serveur, repris du code source
-PORTAL_USE_RATIO	0.5	Fallback campaign (middle-gateways)
+MAP_PORTAL_USE_RANGE	125	Rayon serveur
+PORTAL_USE_RATIO	0.32 (v20.0.1)	portalUsePoint officiel
 PORTAL_HEIGHT	198	Repris du code source
 PORTAL_OVERSHOOT_PX	45	Push vertical après arrived
-PUSH_DURATION_MS	150	Durée du push (ArrowUp/ArrowDown)
+PUSH_DURATION_MS	150	Durée du push
 ARRIVAL_THRESHOLD_PX	40	Tolérance d'arrivée
 GATEWAY_SPACING	220	Repris du code source
 MAP_MIDDLE	{x: 2400, y: 2400}	Repris du code source
-9. Auto-quest : routine complète ⭐
-Principe
+GATEWAY_POINT_NUDGES	{tutorial_forest: {2240, 2810}, intermediate_snowlands: {2300, 2190}}	v20.0.1
+9. Auto-farm quêtes v20.3 (tracker DOM)
 
-Le bot parcourt les 3 quêtes actives de la guilde, voyage vers la map de chaque cible, attend la progression (via kiting ou joueur), et passe à la suivante.
-Lecture des quêtes
+⚠️ Refonte complète en v20.0 : la routine n'utilise plus coop.dailyQuests(), mais le tracker DOM du jeu (.quest-tracker-item).
+Pourquoi le tracker DOM ?
+
+coop.dailyQuests() retourne DailyQuest sans le stat (reward type). Or le panneau Auto Farm utilise des data-group="stat:X". Il faut mapper enemy → stat pour activer le bon camp.
+
+Le tracker DOM expose déjà stat via :
+
+    .quest-tracker-stat → couleur (REWARD_DATA[stat].color de src/game/enemies.ts)
+
+    .quest-tracker-stat → label (rewardStatLabel : "Damage", "Max Health", "Attack Speed", "Armor", "HP/sec", "Crit Damage")
+
+Table couleur → stat (fixée) :
 javascript
 
-function exposerQuestsJson() {
-  pageWindow.eval(`
-    setInterval(() => {
-      const data = wildstatCoop.dailyQuests();
-      window.__wildpote_quests_json__ = JSON.stringify({
-        guildName, bonus, guildPoints,
-        quests: data.quests.map(q => ({ mapId, enemy, target, progress, takenBy }))
-      });
-    }, 3000);
-  `);
+const REWARD_COLOR_TO_STAT = {
+  'rgb(255, 101, 90)':  'damage',   // #ff655a
+  'rgb(102, 237, 121)': 'health',   // #66ed79
+  'rgb(255, 224, 93)':  'speed',    // #ffe05d
+  'rgb(116, 216, 255)': 'armor',    // #74d8ff
+  'rgb(255, 124, 203)': 'regen',    // #ff7ccb
+  'rgb(255, 154, 77)':  'crit',     // #ff9a4d
+};
+
+Lecture du tracker
+javascript
+
+function lireQuetesDepuisTracker() {
+  const items = document.querySelectorAll('.quest-tracker .quest-tracker-item');
+  // Pour chaque item :
+  //   - enemy : .quest-tracker-enemy
+  //   - count : .quest-tracker-count → "X/Y"
+  //   - stat : statDepuisTracker() → couleur prioritaire, label fallback
+  //   - mapName : .quest-tracker-where → "Moonfen" ou ""
+  //   - onMap : class 'is-here'
+  // Retourne { enemy, stat, progress, target, mapName, onMap, groupe: `stat:${stat}` }
 }
 
-Filtre actives vs en attente
-javascript
+Activation Aggro
 
-const open = quests.filter(q => q.progress < q.target && !q.takenBy);
-const actives = open.slice(0, 3);      // les 3 slots "actifs" du jeu
-const enAttente = open.slice(3);       // slots "en attente" (farmables seulement si un slot se libère)
+Le panneau Auto Farm a des groupes [data-group="stat:X"] et des boutons [data-mode="off|farm|aggro"].
 
-⚠️ Les quêtes "en attente" ne sont PAS farmables — elles ne peuvent être complétées que si le slot actif correspondant se libère. Le bot ignore enAttente pour éviter de viser une map qui ne fera rien avancer.
-Auto-farm quêtes — routine
+⚠️ Problème v20.0 : le panneau #autoFarmSheet est dans le DOM mais son contenu #autoFarmContent est hidden tant que l'utilisateur n'a pas ouvert le panneau. Les [data-group] ne sont pas rendus (via renderChoices()) tant que content.hidden = true.
+
+Fix v20.0.1 : activerAggroSurGroupe ouvre le panneau via .farm-toggle si content.hidden, attend 400ms (le refresh() à 250ms appelle renderChoices()), puis interagit.
+Routine complète (v20.3)
 text
 
 MAX_ITER = 20 itérations
 Chaque itération :
-  1. Lire les quêtes
-  2. Filtrer les 3 actives
-  3. Ignorer les quêtes sur endless (quêtes campaign uniquement)
-  4. Si sur endless → retour forcé à ion_citadel d'abord
-  5. Calculer distance de chaque cible (index maps)
-  6. Trier par distance croissante
-  7. Voyager vers la cible
-  8. Attendre progression (max 60s, tick 3s) :
-     - Si progression → log 📈
-     - Si terminée → break
-     - Si disparue → break (finie par un autre)
-  9. Si timeout 60s sans progression → log ⚠️ et itération suivante
+  1. lireQuetesDepuisTracker() → 3 quêtes
+  2. Filtrer : progress < target ET groupe défini (stat connue)
+  3. Trier : onMap d'abord
+  4. Prendre la première cible
+  5. Si !onMap && mapName → voyagerVersMap(targetMapId)
+  6. activerAggroSurGroupe(cible.groupe)
+  7. Attendre progression (max 60s, tick 3s) :
+     - 📈 X/Y à chaque progression
+     - ✅ terminée → break
+     - ✅ disparue → break
+     - ⚠️ 60s sans progrès → itération suivante
+  8. Itération suivante (relecture tracker)
 
-Voyage — voyagerVersMap
-javascript
+⚠️ Le tracker DOM lit déjà la progression en temps réel (poll serveur via coop.dailyQuests() + optimistic counting local). Pas besoin d'attendre le serveur.
+UI temps réel
 
-while (currentMap !== targetMapId && guard < 30) {
-  const resolved = trouverPortailVersCible(currentMap, targetMapId);
-  const result = await allerAuPortail({ targetMapId });
-  if (!result.ok) return false;
-  currentMap = result.newMapId;
-  guard++;
-}
+L'onglet QUEST utilise deux sources :
 
-Boucle jusqu'à atteindre la cible. Chaque appel = un seul portail.
-Ignorer les endless
+    Actives : mettreAJourQuestsDepuisTracker() (1s) → lit le tracker DOM
 
-Les quêtes sont uniquement sur les maps campaign. Le bot :
+    Terminées/Guild/Bonus : mettreAJourQuests() (1s) → lit __wildpote_quests_json__
 
-    Ignore les quêtes avec mapId.startsWith('endless_')
-
-    Si le joueur est déjà sur un endless, retour forcé à ion_citadel d'abord (sinon la routine partirait d'une map non-campaign)
-
-Le kiting fait le farm
-
-Le bot ne clique pas sur les mobs. Il surveille la progression. C'est le kiting (ou le joueur) qui tue les mobs. Sans kiting actif, l'auto-farm ferait ⚠️ Aucune progression en 60s en boucle.
-Auto-farm quête — exemple de run complet (v19.5)
-text
-
-23:56:15 Démarrage auto-farm quêtes
-23:56:15 ⚠️ Sur endless_15, retour forcé à ion_citadel
-23:56:15 → 23:56:41 : 15 portails endless + 1 ion_citadel = 26s
-23:56:41 ✅ Revenu sur ion_citadel
-23:56:41 🎯 Cible: Fen Needle sur moonfen (0/55) — distance 6 maps
-23:56:41 → 23:56:51 : 6 portails campaign = 10s
-23:56:53 ⚔️ Sur place, attente progression quête
-
+Les cartes actives sont colorées par stat (via REWARD_COLOR_TO_STAT_REVERSE) : damage=rouge, health=vert, speed=jaune, armor=cyan, regen=rose, crit=orange.
 10. Debug et diagnostic
-Boutons disponibles (UI)
-Onglet	Bouton	Action
-KITING	📋 Copier diag kiting	Kiting actif, position, chasseurs, orbite, état
-QUEST → TEST PORTAILS	← Portail -1 / Portail +1 →	Test manuel d'un portail
-QUEST → TEST PORTAILS	📋 Copier diag portail	Dernier diag portail complet
-QUEST → TEST PORTAILS	🔍 Debug portails	Log du JSON __wildpote_getPortals__()
-QUEST → AUTO-FARM	📋 Copier logs auto-farm	50 derniers logs de la routine
-QUEST	🔄 REFRESH QUÊTES	refreshDailyQuests()
+Console F12 (wildpoteDebug)
+
+⚠️ v20.3 : les boutons TEST PORTAILS et TEST TRACKER ont été supprimés de l'UI et remplacés par window.wildpoteDebug :
+Méthode	Action
+wildpoteDebug.dumpTracker()	Console.table des quêtes du tracker
+wildpoteDebug.dumpPanel()	Console.table des [data-group] du panneau Auto Farm
+wildpoteDebug.getPortals(mapId?)	JSON brut de __wildpote_getPortals__
+wildpoteDebug.diagPortail()	Texte du dernier diag portail
+wildpoteDebug.version	"20.3"
 Logs [WildPote] en console
 
 Format : [WildPote] 🗺️ MAP CHANGE: endless_45 → endless_44 pos=(...) [DOM="..."] @ 23:56:17
 
-    Moniteur MAP CHANGE (100ms) : logge chaque changement de mapId avec la position serveur et le DOM.
+    Moniteur MAP CHANGE (100ms) : logge chaque changement de mapId
 
-    🧭 getPortalTarget : source du portail (endless / campaign-gateways / map-editor-override / fallback / null).
+    🧭 getPortalTarget : source du portail (endless / campaign-gateways / map-editor-override / fallback / null)
 
-    🎯 Portail direct trouvé / Pas de match direct : résolution.
+    🎯 Portail direct trouvé / Pas de match direct : résolution
 
-    🔎 waitPortail (1 sur 5 ticks) : position serveur à chaque 1s d'attente.
+    🔎 waitPortail (1 sur 5 ticks) : position serveur à chaque 1s d'attente
+
+    🤖 Auto-farm quêtes : logs de la routine (logAutoFarm)
 
 Diag portail — types d'événements
-Event	Signification
-target	Cible initiale (useX, useY, source)
-tick	Position minimap toutes les 5 ticks
-arrived	dist < 40 atteint
-push-directional	ArrowUp/ArrowDown envoyé
-map-changed-during-walk	Transition détectée pendant la marche
-transition-during-walk	Transition validée pendant la marche
-transition-dom	Transition via DOM #minimapMapName
-transition-localstate	Transition via localState.mapId
-timeout	Marche timeout (25s)
-walk-failed	Impossible d'atteindre
-timeout-transition	Attente transition timeout (10s)
-success	Transition réussie après attente
-timeout-during-walk	Jamais déclenché
+
+(inchangé, voir v19.5)
 Erreurs courantes
 Message	Cause	Solution
 Chasseurs: 0	Hook pas installé, ou pas en combat	Vérifier hook, aller en combat
-État: safe permanent	Aucun mob à moins de KITE_ROOM	Attendre
 Permission denied to access object	Xray bloque	Utiliser JSON (déjà fait)
 Hook installé: ❌	pageWindow.eval échoue	Vérifier CSP, @grant unsafeWindow
-Aucune progression en 60s	Kiting inactif sur la map cible	Activer le kiting, ou jouer manuellement
-Aucun portail vers X	getAllRealPortals échoue ET fallbackPortal retourne null	Vérifier MAPS_ORDRE
-Touches ignorées (joueur immobile)	Canvas aria-hidden, pas de focus	Fix getCanvas() (v19.4)
-Fenêtre auto-farm à chaque portail	Space envoyé par simulerAppuiTouches	Fix v19.5 (pushDirectionnel uniquement)
+Aucune progression en 60s	Kiting inactif, ou mauvais groupe	Vérifier que le bon camp est Aggro
+Aucun groupe dans le panneau	Contenu non rendu (jamais ouvert)	v20.0.1 ouvre le panneau automatiquement
+Groupe "stat:X" introuvable	Le groupe n'existe pas sur cette map	Vérifier dispo via wildpoteDebug.dumpPanel()
+❌ Portail échoué (Tutorial Forest)	Fallback wrong (v20.0)	v20.0.1 corrige avec GATEWAY_POINT_NUDGES
 11. Historique des décisions
 Version	Décision	Raison
-V1	Interception WebSocket via patch prototype.send	❌ CSP + timing
-V2-V5	Injection <script> externe (raw.githack)	❌ CSP
-V6	GM_addElement	❌ CSP
-V7	unsafeWindow.eval	❌ CSP
+V1	Interception WebSocket	❌ CSP + timing
+V2-V7	Injection externe, GM_addElement, eval	❌ CSP
 V8	@sandbox JavaScript + unsafeWindow.wrappedJSObject	✅ Firefox uniquement
-V9	UI 4 onglets, Home global, persistance	✅
-V10.0-10.3	Hook Array via eval	✅ mais Xray bloque la lecture
-V10.4	Hook écrit JSON cross-context	✅ Xray contourné
-V10.5	Throttle 50ms + 4 méthodes + bouton diagnostic	✅ Firefox ne plante plus
-V18.x	Portails : allerAuPortail retourne {ok, newMapId} + voyagerVersMap utilise le retour	✅ Plus de stale
-V19.0	Bonus destination + hardcode CAMPAIGN_GATEWAYS	⚠️ CAMPAIGN_GATEWAYS pas exposé, 0.32 loupe
-V19.1	Retour PORTAL_USE_RATIO = 0.5 (validé v18.8)	✅ Retour à la config qui marchait
-V19.2	Fix multi-traversée (marcherVersDiag détecte mapId change)	✅ 1 seule transition par appel
-V19.3	Fix marcherVersDiag utilise localState	❌ RÉGRESSION — localState stale
-V19.4	Retour getPositionInterpolee (minimap) + focus canvas	✅ Position à jour + touches reçues
-V19.5	pushDirectionnel (ArrowUp/Down 150ms) remplace les 7 touches d'interaction	✅ Collision déclenchée, plus de fenêtre UI
-Décisions notables v18-v19.5
-
-PORTAL_USE_RATIO = 0.5 (v19.1) — Le 0.32 officiel (y - height * 0.32) donne y - 63.36. Le bot, arrêté à dist < 40, finit à y - 63.36 + 40 = y - 23. Trop proche du pied, la collision ne prend pas toujours. Avec 0.5 (milieu de hitbox), le bot vise y - 99 + 45 = y - 54, plus safe. Combiné au push de 150ms en v19.5, ça marche à tous les coups.
-
-Fallback MAPS_ORDRE plutôt que hardcode CAMPAIGN_GATEWAYS (v19.5) — CAMPAIGN_GATEWAYS n'est pas exposé sur window (module ES non pollué). Le hardcode aurait dupliqué une info qui change à chaque update du jeu. Le fallback (2400 ± 110, 2400) est exactement ce que le serveur utilise (via middleGateways), donc pas de risque de désync.
-
-Ignorer les quêtes endless (v19.5) — Les quêtes sont campaign uniquement (règle du jeu). Si le bot acceptait les cibles endless, il ferait des allers-retours sans fin.
-
-Retour forcé ion_citadel si départ sur endless (v19.5) — Si l'utilisateur lance l'auto-farm depuis un endless, la routine doit d'abord descendre jusqu'à ion_citadel (15 portails max) avant de pouvoir rejoindre une campaign map. Sans ça, voyagerVersMap partirait d'un index > 15 et ferait n'importe quoi.
-
-pushDirectionnel 150ms plutôt que 100ms (v19.5) — En dessous de 100ms, parfois la frame d'input n'est pas captée par le client. Au-dessus de 200ms, le joueur dépasse la zone. 150ms = 44px de parcours à vitesse 295 = juste assez pour passer du bord au centre.
+V10.0-10.4	Hook Array via eval + JSON cross-context	✅
+V10.5	Throttle 50ms	✅ Firefox ne plante plus
+V18.x	Portails : {ok, newMapId}	✅ Plus de stale
+V19.0	Hardcode CAMPAIGN_GATEWAYS	⚠️ Pas exposé
+V19.1	PORTAL_USE_RATIO = 0.5	✅
+V19.2	Fix multi-traversée	✅
+V19.3	Fix localState	❌ Régression
+V19.4	Retour getPositionInterpolee + focus canvas	✅
+V19.5	pushDirectionnel remplace les 7 touches	✅
+V20.0	Refonte auto-farm quêtes : tracker DOM	✅ item.stat fourni, plus de table ENEMY_REWARD_TYPES
+V20.0.1	Fix fallbackPortal (nudges + ratio 0.32 + half=0)	✅ Tutorial Forest OK
+V20.0.1	Fix activerAggroSurGroupe (ouverture panneau)	✅ Groupes visibles
+V20.2	Nettoyage : 7 fonctions orphelines supprimées	✅ Code plus propre
+V20.3	Suppression bouton HOME + TEST PORTAILS/TRACKER	✅ UI plus simple, debug en console
+V20.3	Quêtes actives colorées par stat	✅ Feedback visuel immédiat
+V20.3	Fix collapse section (append + appendChild)	✅ RÉSUMÉ collapse OK
 12. Pistes futures
 Court terme
 
-    Auto-quest plus intelligente : regrouper les 3 quêtes par proximité (éviter les allers-retours), changer de cible si 3 itérations sans progression sur la même map.
+    Nettoyage getAllRealPortals / getRealPortal : tester sur plusieurs maps si __wildpote_getPortals__ retourne vraiment des données. Si toujours null, supprimer.
 
-    Téléport town : quand ion_citadel est atteint, faire un changeMap("town", ...) puis voyager directement vers la map cible plutôt que de traverser les 6 campaign portails.
+    voyagerViaMoveOn en fallback : utiliser le bouton Move On natif du jeu quand marcherVersDiag échoue (activé via Move At = 0.1x temporaire).
 
-    Nettoyage : retirer les logs console.log de debug (garder pushLog UI).
+    Retry portails : si allerAuPortail échoue, retry une fois avant d'abandonner.
 
 Moyen terme
 
-    Auto-prestige déclenché par condition réelle : actuellement declencherPrestige() est appelé toutes les 2s si autoPrestigeActif, ce qui peut surcharger. Ajouter un check prestigeAvailable() côté API.
+    Auto-prestige condition réelle : declencherPrestige() est appelé toutes les 2s si autoPrestigeActif, ce qui peut surcharger. Ajouter un check prestigeAvailable() côté API.
 
-    Auto-research : lancer les recherches utiles (Move Speed, Critical Damage) dans l'ordre.
+    Auto-research : lancer les recherches utiles dans l'ordre.
 
-    Auto-gems : réclamer le bonus daily à minuit UTC + les ads si activé.
+    Auto-gems : réclamer le bonus daily à minuit UTC + les ads.
 
 Long terme
 
     Mode campaign / reflect / aggro / soul dans FARM : configurer les switches de l'autofarm ingame via l'UI.
 
-    Kiting avancé : mode planEvasion complet (esquive + orbite), pas juste orbite.
+    Kiting avancé : mode planEvasion complet.
 
-    Chrome : trouver une solution (extension dédiée, ou attendre une API).
-
-    Hooks canvas AoE : intercepter CanvasRenderingContext2D.prototype.arc pour lire les zones d'attaque des boss.
+    Chrome : trouver une solution (extension dédiée).
 
 Recherche — mécaniques à explorer
 
-    travelFromHome — le bouton "Retour" de town n'est pas exposé, mais il existe un picker de voyage natif au portail de town (4780, 3635). Pourrait être automatisé via le DOM.
+    travelFromHome : le bouton "Retour" de town n'est pas exposé, mais il existe un picker de voyage natif au portail de town (4780, 3635).
 
-    localState stale — comprendre pourquoi le serveur met 1-2s à update. Peut-être un réglage côté client (syncMovementState interval).
+    localState stale : comprendre pourquoi 1-2s de lag.
 
-    Serveur change_map cooldown — est-ce qu'il y a un cooldown entre deux change_map ? (non observé, mais à vérifier).
-
-    Position (2215, 2555) après arrived sur endless — le joueur est téléporté à cette position. Est-ce un anti-blocage, un respawn, ou une conséquence de la collision ratée ? À creuser.
+    Serveur change_map cooldown : à vérifier.
 
 Annexe — Sources du jeu utilisées
-
-Les mécaniques serveur ont été vérifiées dans le code source du jeu (shared/map-gateways.ts, spacetimedb/src/map-travel.ts) :
 typescript
 
 // shared/map-gateways.ts
@@ -563,22 +494,55 @@ export function portalUsePoint(portal) {
 export const GATEWAY_PORTAL_SPACING = 220;
 export const GATEWAY_ARRIVAL_DROP = 90;
 export const MAP_MIDDLE = { x: WORLD_WIDTH / 2, y: WORLD_HEIGHT / 2 };
+export const GATEWAY_POINT_NUDGES = {
+  [TUTORIAL_FOREST_MAP_ID]: { x: 2240, y: 2810 },
+  intermediate_snowlands: { x: 2300, y: 2190 },
+};
 
 // spacetimedb/src/map-travel.ts
 export const MAP_PORTAL_USE_RANGE = 125;
-if (portalDistance > MAP_PORTAL_USE_RANGE) throw new SenderError("Move closer to the portal.");
 
-typescript
-
-// shared/procedural-maps.ts
-export function generateMap(id: ProceduralMapId): GeneratedMap {
-  // ...
-  portals: [
-    { x: PORTAL_CENTER.x - 110, y: PORTAL_CENTER.y, width: 198, height: 198,
-      depth: PORTAL_CENTER.y, destination: number === 1 ? PROCEDURAL_ENTRY_MAP : proceduralMapId(number - 1) },
-    ...(number < Number.MAX_SAFE_INTEGER ? [{ x: PORTAL_CENTER.x + 110, y: PORTAL_CENTER.y, ...,
-      destination: proceduralMapId(number + 1) }] : []),
-  ],
+// src/game/enemies.ts
+export const REWARD_DATA: Record<RewardType, { color: string }> = {
+  damage: { color: "#ff655a" }, health: { color: "#66ed79" },
+  speed: { color: "#ffe05d" }, armor: { color: "#74d8ff" },
+  regen: { color: "#ff7ccb" }, crit: { color: "#ff9a4d" },
+};
+export function rewardStatLabel(reward) {
+  if (reward.type === "damage") return "Damage";
+  if (reward.type === "health") return "Max Health";
+  if (reward.type === "speed") return "Attack Speed";
+  if (reward.type === "crit") return "Crit Damage";
+  if (reward.type === "armor") return "Armor";
+  return "HP/sec";
 }
 
-Ces valeurs sont hardcodées dans le bot (MAP_MIDDLE, GATEWAY_SPACING, PORTAL_HEIGHT, MAP_PORTAL_USE_RANGE) mais recalculées à chaque version du jeu — si le jeu change le spacing ou le usePoint, il faudra mettre à jour le bot.
+// src/ui/quest-board-controller.ts (item.stat du QuestTrackerView)
+const stat: RewardType | null = ENEMY_TYPES[quest.enemy as EnemyKind]?.reward.type ?? null;
+
+Ces valeurs sont hardcodées dans le bot mais recalculées à chaque version du jeu. Si le jeu change le spacing ou le usePoint, il faudra mettre à jour.
+text
+
+
+---
+
+## 🎯 Ce qui a changé en résumé
+
+| Section | Avant (v19.5) | Après (v20.3) |
+|---|---|---|
+| §4 UI | TEST PORTAILS + toggle auto-farm | Supprimés, bouton dynamique Lancer/Arrêter |
+| §4 Footer | Bouton HOME | Supprimé |
+| §5 Portails | `PORTAL_USE_RATIO = 0.5` | **0.32 + nudges** |
+| §8 Navigation | Fallback générique | **`GATEWAY_POINT_NUDGES`** (Tutorial Forest OK) |
+| §9 Auto-quest | `coop.dailyQuests()` + `takesBy` | **Tracker DOM** (`item.stat` + couleur) |
+| §10 Debug | Boutons UI | **`wildpoteDebug.*` console** |
+| §11 Historique | V19.5 | + v20.0 / v20.0.1 / v20.2 / v20.3 |
+
+## 📌 Points optionnels à décider
+
+1. **Section §2** : j'ai retiré `home_exterior` de "Maps connues" ? Non, je l'ai laissé. Tu veux le retirer ?
+2. **Section §3 CSP** : toujours d'actualité ? Tu es toujours sur Firefox + Violentmonkey ?
+3. **Section §12 Pistes** : j'ai retiré les items v19.5 déjà faits (auto-quest plus intelligente = fait, téléport town = à faire, nettoyage logs = fait). Tu veux ajouter d'autres pistes ?
+
+Si tout te va, tu peux coller ce document à la place de l'ancien. Sinon dis-moi ce qu'il faut ajuster. 🚀
+
